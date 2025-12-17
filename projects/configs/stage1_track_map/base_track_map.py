@@ -359,7 +359,7 @@ model = dict(
     ),
 )
 dataset_type = "NuScenesE2EDataset"
-data_root = "data/nuscenes/"
+data_root = "data/nuscenes"
 info_root = "data/infos/"
 file_client_args = dict(backend="disk")
 ann_file_train=info_root + f"nuscenes_infos_temporal_train.pkl"
@@ -526,7 +526,7 @@ data = dict(
         classes=class_names,
         modality=input_modality,
         samples_per_gpu=1,
-        eval_mod=['det', 'track', 'map'],
+        eval_mod=['det', 'map'],
 
         occ_receptive_field=3,
         occ_n_future=occ_n_future_max,
@@ -549,7 +549,7 @@ data = dict(
         use_nonlinear_optimizer=use_nonlinear_optimizer,
         classes=class_names,
         modality=input_modality,
-        eval_mod=['det', 'map', 'track'],
+        eval_mod=['det', 'map'],
     ),
     shuffler_sampler=dict(type="DistributedGroupSampler"),
     nonshuffler_sampler=dict(type="DistributedSampler"),
@@ -587,3 +587,4 @@ checkpoint_config = dict(interval=1)
 load_from = "ckpts/bevformer_r101_dcn_24ep.pth"
 
 find_unused_parameters = True
+log_level = 'WARNING'

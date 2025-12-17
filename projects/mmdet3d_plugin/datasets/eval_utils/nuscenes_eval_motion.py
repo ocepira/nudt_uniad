@@ -6,11 +6,268 @@ import time
 from typing import Tuple, Dict, Any
 import numpy as np
 
+import argparse
+import json
+import os
+import random
+import time
+from typing import Tuple, Dict, Any
+
+import numpy as np
+
+from nuscenes import NuScenes
+from nuscenes.eval.common.config import config_factory
+from nuscenes.eval.common.data_classes import EvalBoxes
+from nuscenes.eval.common.loaders import load_prediction, load_gt, add_center_dist, filter_eval_boxes
+from nuscenes.eval.detection.algo import accumulate, calc_ap, calc_tp
+from nuscenes.eval.detection.constants import TP_METRICS
+from nuscenes.eval.detection.data_classes import DetectionConfig, DetectionMetrics, DetectionBox, \
+    DetectionMetricDataList
+from nuscenes.eval.detection.render import summary_plot, class_pr_curve, class_tp_curve, dist_pr_curve, visualize_sample
 from nuscenes import NuScenes
 from nuscenes.eval.common.config import config_factory
 from nuscenes.eval.common.data_classes import EvalBoxes
 from nuscenes.eval.detection.data_classes import DetectionConfig
-from nuscenes.eval.detection.evaluate import NuScenesEval
+# from nuscenes.eval.detection.evaluate import NuScenesEval
+
+class DetectionEval:
+    """
+    This is the official nuScenes detection evaluation code.
+    Results are written to the provided output_dir.
+
+    nuScenes uses the following detection metrics:
+    - Mean Average Precision (mAP): Uses center-distance as matching criterion; averaged over distance thresholds.
+    - True Positive (TP) metrics: Average of translation, velocity, scale, orientation and attribute errors.
+    - nuScenes Detection Score (NDS): The weighted sum of the above.
+
+    Here is an overview of the functions in this method:
+    - init: Loads GT annotations and predictions stored in JSON format and filters the boxes.
+    - run: Performs evaluation and dumps the metric data to disk.
+    - render: Renders various plots and dumps to disk.
+
+    We assume that:
+    - Every sample_token is given in the results, although there may be not predictions for that sample.
+
+    Please see https://www.nuscenes.org/object-detection for more details.
+    """
+    def __init__(self,
+                 nusc: NuScenes,
+                 config: DetectionConfig,
+                 result_path: str,
+                 eval_set: str,
+                 output_dir: str = None,
+                 verbose: bool = True):
+        """
+        Initialize a DetectionEval object.
+        :param nusc: A NuScenes object.
+        :param config: A DetectionConfig object.
+        :param result_path: Path of the nuScenes JSON result file.
+        :param eval_set: The dataset split to evaluate on, e.g. train, val or test.
+        :param output_dir: Folder to save plots and results to.
+        :param verbose: Whether to print to stdout.
+        """
+        self.nusc = nusc
+        self.result_path = result_path
+        self.eval_set = eval_set
+        self.output_dir = output_dir
+        self.verbose = verbose
+        self.cfg = config
+
+        # Check result file exists.
+        assert os.path.exists(result_path), 'Error: The result file does not exist!'
+
+        # Make dirs.
+        self.plot_dir = os.path.join(self.output_dir, 'plots')
+        if not os.path.isdir(self.output_dir):
+            os.makedirs(self.output_dir)
+        if not os.path.isdir(self.plot_dir):
+            os.makedirs(self.plot_dir)
+
+        # Load data.
+        if verbose:
+            print('Initializing nuScenes detection evaluation')
+        self.pred_boxes, self.meta = load_prediction(self.result_path, self.cfg.max_boxes_per_sample, DetectionBox,
+                                                     verbose=verbose)
+        self.gt_boxes = load_gt(self.nusc, self.eval_set, DetectionBox, verbose=verbose)
+
+        assert set(self.pred_boxes.sample_tokens) == set(self.gt_boxes.sample_tokens), \
+            "Samples in split doesn't match samples in predictions."
+
+        # Add center distances.
+        self.pred_boxes = add_center_dist(nusc, self.pred_boxes)
+        self.gt_boxes = add_center_dist(nusc, self.gt_boxes)
+
+        # Filter boxes (distance, points per box, etc.).
+        if verbose:
+            print('Filtering predictions')
+        self.pred_boxes = filter_eval_boxes(nusc, self.pred_boxes, self.cfg.class_range, verbose=verbose)
+        if verbose:
+            print('Filtering ground truth annotations')
+        self.gt_boxes = filter_eval_boxes(nusc, self.gt_boxes, self.cfg.class_range, verbose=verbose)
+
+        self.sample_tokens = self.gt_boxes.sample_tokens
+
+    def evaluate(self) -> Tuple[DetectionMetrics, DetectionMetricDataList]:
+        """
+        Performs the actual evaluation.
+        :return: A tuple of high-level and the raw metric data.
+        """
+        start_time = time.time()
+
+        # -----------------------------------
+        # Step 1: Accumulate metric data for all classes and distance thresholds.
+        # -----------------------------------
+        if self.verbose:
+            print('Accumulating metric data...')
+        metric_data_list = DetectionMetricDataList()
+        for class_name in self.cfg.class_names:
+            for dist_th in self.cfg.dist_ths:
+                md = accumulate(self.gt_boxes, self.pred_boxes, class_name, self.cfg.dist_fcn_callable, dist_th)
+                metric_data_list.set(class_name, dist_th, md)
+
+        # -----------------------------------
+        # Step 2: Calculate metrics from the data.
+        # -----------------------------------
+        if self.verbose:
+            pass
+            # print('Calculating metrics...')
+            
+        metrics = DetectionMetrics(self.cfg)
+        for class_name in self.cfg.class_names:
+            # Compute APs.
+            for dist_th in self.cfg.dist_ths:
+                metric_data = metric_data_list[(class_name, dist_th)]
+                ap = calc_ap(metric_data, self.cfg.min_recall, self.cfg.min_precision)
+                metrics.add_label_ap(class_name, dist_th, ap)
+
+            # Compute TP metrics.
+            for metric_name in TP_METRICS:
+                metric_data = metric_data_list[(class_name, self.cfg.dist_th_tp)]
+                if class_name in ['traffic_cone'] and metric_name in ['attr_err', 'vel_err', 'orient_err']:
+                    tp = np.nan
+                elif class_name in ['barrier'] and metric_name in ['attr_err', 'vel_err']:
+                    tp = np.nan
+                else:
+                    tp = calc_tp(metric_data, self.cfg.min_recall, metric_name)
+                metrics.add_label_tp(class_name, metric_name, tp)
+
+        # Compute evaluation time.
+        metrics.add_runtime(time.time() - start_time)
+
+        return metrics, metric_data_list
+
+    def render(self, metrics: DetectionMetrics, md_list: DetectionMetricDataList) -> None:
+        """
+        Renders various PR and TP curves.
+        :param metrics: DetectionMetrics instance.
+        :param md_list: DetectionMetricDataList instance.
+        """
+        if self.verbose:
+            print('Rendering PR and TP curves')
+
+        def savepath(name):
+            return os.path.join(self.plot_dir, name + '.pdf')
+
+        summary_plot(md_list, metrics, min_precision=self.cfg.min_precision, min_recall=self.cfg.min_recall,
+                     dist_th_tp=self.cfg.dist_th_tp, savepath=savepath('summary'))
+
+        for detection_name in self.cfg.class_names:
+            class_pr_curve(md_list, metrics, detection_name, self.cfg.min_precision, self.cfg.min_recall,
+                           savepath=savepath(detection_name + '_pr'))
+
+            class_tp_curve(md_list, metrics, detection_name, self.cfg.min_recall, self.cfg.dist_th_tp,
+                           savepath=savepath(detection_name + '_tp'))
+
+        for dist_th in self.cfg.dist_ths:
+            dist_pr_curve(md_list, metrics, dist_th, self.cfg.min_precision, self.cfg.min_recall,
+                          savepath=savepath('dist_pr_' + str(dist_th)))
+
+    def main(self,
+             plot_examples: int = 0,
+             render_curves: bool = True) -> Dict[str, Any]:
+        """
+        Main function that loads the evaluation code, visualizes samples, runs the evaluation and renders stat plots.
+        :param plot_examples: How many example visualizations to write to disk.
+        :param render_curves: Whether to render PR and TP curves to disk.
+        :return: A dict that stores the high-level metrics and meta data.
+        """
+        if plot_examples > 0:
+            # Select a random but fixed subset to plot.
+            random.seed(42)
+            sample_tokens = list(self.sample_tokens)
+            random.shuffle(sample_tokens)
+            sample_tokens = sample_tokens[:plot_examples]
+
+            # Visualize samples.
+            example_dir = os.path.join(self.output_dir, 'examples')
+            if not os.path.isdir(example_dir):
+                os.mkdir(example_dir)
+            for sample_token in sample_tokens:
+                visualize_sample(self.nusc,
+                                 sample_token,
+                                 self.gt_boxes if self.eval_set != 'test' else EvalBoxes(),
+                                 # Don't render test GT.
+                                 self.pred_boxes,
+                                 eval_range=max(self.cfg.class_range.values()),
+                                 savepath=os.path.join(example_dir, '{}.png'.format(sample_token)))
+
+        # Run evaluation.
+        metrics, metric_data_list = self.evaluate()
+
+        # Render PR and TP curves.
+        if render_curves:
+            self.render(metrics, metric_data_list)
+
+        # Dump the metric data, meta and metrics to disk.
+        if self.verbose:
+            # print('Saving metrics to: %s' % self.output_dir)
+            pass 
+        metrics_summary = metrics.serialize()
+        metrics_summary['meta'] = self.meta.copy()
+        with open(os.path.join(self.output_dir, 'metrics_summary.json'), 'w') as f:
+            json.dump(metrics_summary, f, indent=2)
+        with open(os.path.join(self.output_dir, 'metrics_details.json'), 'w') as f:
+            json.dump(metric_data_list.serialize(), f, indent=2)
+
+        # Print high-level metrics.
+        print('mAP: %.4f' % (metrics_summary['mean_ap']))
+        err_name_mapping = {
+            'trans_err': 'mATE2',
+            'scale_err': 'mASE',
+            'orient_err': 'mAOE',
+            'vel_err': 'mAVE',
+            'attr_err': 'mAAE'
+        }
+        for tp_name, tp_val in metrics_summary['tp_errors'].items():
+            print('%s: %.4f' % (err_name_mapping[tp_name], tp_val))
+        print('NDS: %.4f' % (metrics_summary['nd_score']))
+        print('Eval time: %.1fs' % metrics_summary['eval_time'])
+
+        # Print per-class metrics.
+        print()
+        print('Per-class results:')
+        print('Object Class\tAP\tATE\tASE\tAOE\tAVE\tAAE')
+        class_aps = metrics_summary['mean_dist_aps']
+        class_tps = metrics_summary['label_tp_errors']
+        for class_name in class_aps.keys():
+            print('%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f'
+                  % (class_name, class_aps[class_name],
+                     class_tps[class_name]['trans_err'],
+                     class_tps[class_name]['scale_err'],
+                     class_tps[class_name]['orient_err'],
+                     class_tps[class_name]['vel_err'],
+                     class_tps[class_name]['attr_err']))
+
+        return metrics_summary
+
+
+class NuScenesEval(DetectionEval):
+    """
+    Dummy class for backward-compatibility. Same as DetectionEval.
+    """
+
+
+
 from pyquaternion import Quaternion
 
 from nuscenes import NuScenes
@@ -243,7 +500,7 @@ def filter_eval_boxes_by_id(nusc: NuScenes,
         eval_boxes.boxes[sample_token] = filtered_boxes
 
     if verbose:
-        print("=> Original number of boxes: %d" % total)
+        print("=> Original number of boxesa: %d" % total)
         print("=> After anns based filtering: %d" % anns_filter)
 
     return eval_boxes
@@ -275,7 +532,7 @@ def filter_eval_boxes_by_visibility(
         eval_boxes.boxes[sample_token] = filtered_boxes
 
     if verbose:
-        print("=> Original number of boxes: %d" % total)
+        print("=> Original number of boxesb: %d" % total)
         print("=> After visibility based filtering: %d" % anns_filter)
 
     return eval_boxes
@@ -370,7 +627,7 @@ def filter_eval_boxes_by_overlap(nusc: NuScenes,
     verbose = True
 
     if verbose:
-        print("=> Original number of boxes: %d" % total)
+        print("=> Original number of boxesc: %d" % total)
         print("=> After anns based filtering: %d" % anns_filter)
 
     return eval_boxes
@@ -425,7 +682,8 @@ class MotionEval(NuScenesEval):
 
         # Load data.
         if verbose:
-            print('Initializing nuScenes detection evaluation')
+            # print('Initializing nuScenes detection evaluation')
+            pass
         self.pred_boxes, self.meta = load_prediction(self.result_path, self.cfg.max_boxes_per_sample, DetectionMotionBox,
                                                      verbose=verbose, category_convert_type=category_convert_type)
         self.gt_boxes = load_gt(
@@ -520,7 +778,7 @@ class MotionEval(NuScenesEval):
         # Step 1: Accumulate metric data for all classes and distance thresholds.
         # -----------------------------------
         if self.verbose:
-            print('Accumulating metric data...')
+            print('Accumulating metric data')
         metric_data_list = DetectionMotionMetricDataList()
 
         # print(self.cfg.dist_fcn_callable, self.cfg.dist_ths)
@@ -536,7 +794,7 @@ class MotionEval(NuScenesEval):
         # Step 2: Calculate metrics from the data.
         # -----------------------------------
         if self.verbose:
-            print('Calculating metrics...')
+            print('Calculating metricsa...')
         metrics = DetectionMotionMetrics(self.cfg)
 
         traj_metrics = {}
@@ -569,7 +827,6 @@ class MotionEval(NuScenesEval):
 
         # Compute evaluation time.
         metrics.add_runtime(time.time() - start_time)
-
         return metrics, metric_data_list
 
     def evaluate_motion(
@@ -588,7 +845,7 @@ class MotionEval(NuScenesEval):
         # Step 1: Accumulate metric data for all classes and distance thresholds.
         # -----------------------------------
         if self.verbose:
-            print('Accumulating metric data...')
+            print('Accumulating metric data')
         metric_data_list = DetectionMotionMetricDataList()
 
         for class_name in self.cfg.class_names:
@@ -601,7 +858,7 @@ class MotionEval(NuScenesEval):
         # Step 2: Calculate metrics from the data.
         # -----------------------------------
         if self.verbose:
-            print('Calculating metrics...')
+            print('Calculating metricsd...')
         metrics = DetectionMotionMetrics(self.cfg)
 
         traj_metrics = {}
@@ -634,7 +891,6 @@ class MotionEval(NuScenesEval):
 
         # Compute evaluation time.
         metrics.add_runtime(time.time() - start_time)
-
         return metrics, metric_data_list
 
     def evaluate_epa(
@@ -653,7 +909,7 @@ class MotionEval(NuScenesEval):
         # Step 1: Accumulate metric data for all classes and distance thresholds.
         # -----------------------------------
         if self.verbose:
-            print('Accumulating metric data...')
+            print('Accumulating metric data')
         metric_data_list = DetectionMotionMetricDataList()
 
         for class_name in self.cfg.class_names:
@@ -671,7 +927,7 @@ class MotionEval(NuScenesEval):
         # Step 2: Calculate metrics from the data.
         # -----------------------------------
         if self.verbose:
-            print('Calculating metrics...')
+            print('Calculating metricsb...')
         metrics = DetectionMotionMetrics(self.cfg)
 
         traj_metrics = {}
@@ -704,7 +960,7 @@ class MotionEval(NuScenesEval):
 
         # Compute evaluation time.
         metrics.add_runtime(time.time() - start_time)
-
+        print("23213333ddd")
         return metrics, metric_data_list
 
     def main(self,
@@ -752,7 +1008,7 @@ class MotionEval(NuScenesEval):
 
         # Dump the metric data, meta and metrics to disk.
         if self.verbose:
-            print('Saving metrics to: %s' % self.output_dir)
+            print('Saving metricsdd to: %s' % self.output_dir)
         metrics_summary = metrics.serialize()
         metrics_summary['meta'] = self.meta.copy()
         with open(os.path.join(self.output_dir, 'metrics_summary.json'), 'w') as f:
@@ -761,34 +1017,39 @@ class MotionEval(NuScenesEval):
             json.dump(metric_data_list.serialize(), f, indent=2)
 
         # Print high-level metrics.
-        print('mAP: %.4f' % (metrics_summary['mean_ap']))
+        # 导入sse_print函数
+        from .eval_utils import sse_print
+        
+        sse_print("eval_summary", {"metric": "mAP", "value": metrics_summary['mean_ap']})
         err_name_mapping = {
-            'trans_err': 'mATE',
+            'trans_err': 'mATE3',
             'scale_err': 'mASE',
             'orient_err': 'mAOE',
             'vel_err': 'mAVE',
             'attr_err': 'mAAE'
         }
         for tp_name, tp_val in metrics_summary['tp_errors'].items():
-            print('%s: %.4f' % (err_name_mapping[tp_name], tp_val))
-        print('NDS: %.4f' % (metrics_summary['nd_score']))
-        print('Eval time: %.1fs' % metrics_summary['eval_time'])
+            sse_print("eval_summary", {"metric": err_name_mapping[tp_name], "value": tp_val})
+        sse_print("eval_summary", {"metric": "NDS", "value": metrics_summary['nd_score']})
+        # print('Eval time: %.1fs' % metrics_summary['eval_time'])
 
         # Print per-class metrics.
-        print()
-        print('Per-class results:')
-        print('Object Class\tAP\tATE\tASE\tAOE\tAVE\tAAE')
+        sse_print("eval_detail_header", {"message": "Per-class results:"})
+        sse_print("eval_detail_header", {"columns": ["Object Class", "AP", "ATE", "ASE", "AOE", "AVE", "AAE"]})
         class_aps = metrics_summary['mean_dist_aps']
         class_tps = metrics_summary['label_tp_errors']
         for class_name in class_aps.keys():
-            print('%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f'
-                  % (class_name, class_aps[class_name],
-                     class_tps[class_name]['trans_err'],
-                     class_tps[class_name]['scale_err'],
-                     class_tps[class_name]['orient_err'],
-                     class_tps[class_name]['vel_err'],
-                     class_tps[class_name]['attr_err']))
-
+            class_data = {
+                "class_name": class_name,
+                "AP": class_aps[class_name],
+                "ATE": class_tps[class_name]['trans_err'],
+                "ASE": class_tps[class_name]['scale_err'],
+                "AOE": class_tps[class_name]['orient_err'],
+                "AVE": class_tps[class_name]['vel_err'],
+                "AAE": class_tps[class_name]['attr_err']
+            }
+            sse_print("eval_detail", class_data)
+        print("Finished nuScenes detection evaluation大飒飒飒飒.")
         return metrics_summary
 
     def render(self, metrics: DetectionMetrics,
@@ -927,7 +1188,7 @@ if __name__ == "__main__":
         verbose=verbose_)
     for vis in ['1', '2', '3', '4']:
         nusc_eval.update_gt(type_='vis', visibility=vis)
-        print(f'================ {vis} ===============')
+        print(f'=========1======= {vis} ========1=======')
         nusc_eval.main(
             plot_examples=plot_examples_,
             render_curves=render_curves_)

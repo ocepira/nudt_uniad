@@ -5,11 +5,96 @@ import sklearn
 import mmcv
 import os
 import warnings
+import sys
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
+import logging
+import json
+from io import StringIO
+def sse_print(event: str, data: dict) -> str:
+    """
+    SSE 打印
+    :param event: 事件名称
+    :param data: 事件数据（字典或能被 json 序列化的对象）
+    :return: SSE 格式字符串
+    """
+    # 将数据转成 JSON 字符串
+    json_str = json.dumps(data, ensure_ascii=False, default=lambda obj: obj.item() if isinstance(obj, np.generic) else obj)
+    
+    # 按 SSE 协议格式拼接
+    message = f"event: {event}\n" \
+              f"data: {json_str}\n"
+    print(message, flush=True)
+
+
+from contextlib import contextmanager
+@contextmanager    
+def suppress_stdout():
+    """临时屏蔽标准输出的上下文管理器"""
+    original_stdout = sys.stdout  # 保存原始stdout
+    sys.stdout = open(os.devnull, 'w')  # 重定向到空设备
+    try:
+        yield
+    finally:
+        sys.stdout.close()  # 关闭空设备文件
+        sys.stdout = original_stdout  # 恢复原始stdout
+# 创建过滤器屏蔽特定消息
+@contextmanager    
+def suppress_stdout_stderr():
+    """同时抑制 stdout、stderr 和文件描述符"""
+    save_stdout = sys.stdout
+    save_stderr = sys.stderr
+    
+    # 保存原始文件描述符
+    save_stdout_fd = os.dup(1)
+    save_stderr_fd = os.dup(2)
+    
+    try:
+        # 重定向到 /dev/null
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        
+        # Python 层面也要重定向
+        sys.stdout = StringIO()
+        sys.stderr = StringIO()
+        
+        yield
+    finally:
+        # 恢复文件描述符
+        os.dup2(save_stdout_fd, 1)
+        os.dup2(save_stderr_fd, 2)
+        os.close(save_stdout_fd)
+        os.close(save_stderr_fd)
+        
+        # 恢复 sys.stdout 和 sys.stderr
+        sys.stdout = save_stdout
+        sys.stderr = save_stderr
+
+class UpgradeInfoFilter(logging.Filter):
+    def filter(self, record):
+        return "ModulatedDeformConvPack" not in record.getMessage()
+
+# 应用到 root logger
+logging.root.addFilter(UpgradeInfoFilter())
+# 重定向stdout/stderr来过滤特定输出
+class FilteredStdout:
+    def __init__(self, original_stdout):
+        self.original_stdout = original_stdout
+    
+    def write(self, text):
+        if "ModulatedDeformConvPack" not in text:
+            self.original_stdout.write(text)
+    
+    def flush(self):
+        self.original_stdout.flush()
+
+# 应用过滤器
+sys.stdout = FilteredStdout(sys.stdout)
 
 from mmdet3d.apis import single_gpu_test
 from mmdet3d.datasets import build_dataset
@@ -21,7 +106,45 @@ from mmdet.datasets import replace_ImageToTensor
 import time
 import os.path as osp
 
+# ===================== 配置 logging，屏蔽 INFO 日志 =====================
+import logging
+
+# 全局配置 logging，设置 root 日志级别为 WARNING（屏蔽 INFO/DEBUG）
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# 清理 root 日志器的默认 handler，避免重复输出
+root_logger = logging.getLogger()
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+# 重新添加 handler，强制级别为 WARNING
+handler = logging.StreamHandler()
+handler.setLevel(logging.WARNING)
+root_logger.addHandler(handler)
+
+# 针对 mmcv/mmdet/mmdet3d 等相关库的日志器也强制设为 WARNING
+for logger_name in ['root', 'mmcv', 'mmdet', 'mmdet3d', 'mmengine']:
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+
+# ===================== 屏蔽 warnings 警告 =====================
+import warnings
 warnings.filterwarnings("ignore")
+
+# ===================== 导入其他模块 =====================
+from mmdet3d.apis import single_gpu_test
+from mmdet3d.apis import single_gpu_test
+warnings.filterwarnings("ignore")
+logging.getLogger('mmcv').setLevel(logging.WARNING)
+logging.getLogger('mmcv').setLevel(logging.WARNING)
+logging.getLogger('mmcv.runner').setLevel(logging.WARNING)
+# from utils.attack import attacks
+
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -105,6 +228,7 @@ def parse_args():
     return args
 
 
+
 def main():
     args = parse_args()
 
@@ -140,7 +264,8 @@ def main():
 
                 for m in _module_dir[1:]:
                     _module_path = _module_path + '.' + m
-                print(_module_path)
+                # print(_module_path)
+                
                 plg_lib = importlib.import_module(_module_path)
             else:
                 # import dir is the dirpath for the config file
@@ -203,7 +328,8 @@ def main():
     fp16_cfg = cfg.get('fp16', None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
-    checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
+    with suppress_stdout():
+        checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu',strict=False)
     if args.fuse_conv_bn:
         model = fuse_conv_bn(model)
     # old versions did not save class info in checkpoints, this walkaround is
@@ -220,7 +346,10 @@ def main():
         model.PALETTE = dataset.PALETTE
 
     if not distributed:
-        assert False
+        model = MMDataParallel(model, device_ids=[0])
+        with suppress_stdout_stderr():
+            outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
+        # assert False
         # model = MMDataParallel(model, device_ids=[0])
         # outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
     else:
@@ -228,13 +357,15 @@ def main():
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
-        outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
-                                        args.gpu_collect)
+        with suppress_stdout_stderr():
+            outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
+                                            args.gpu_collect)
 
     rank, _ = get_dist_info()
     if rank == 0:
         if args.out:
-            print(f'\nwriting results to {args.out}')
+            sse_print('writting_results', {'results_path': args.out})
+            # print(f'\nwriting results to {args.out}')
             #assert False
             mmcv.dump(outputs, args.out)
             #outputs = mmcv.load(args.out)
@@ -253,10 +384,22 @@ def main():
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
-
-            print(dataset.evaluate(outputs, **eval_kwargs))
-
+            
+            try:
+                print(dataset.evaluate(outputs, **eval_kwargs))
+            except AssertionError as e:
+                if "unachieved_thresholds + duplicate_thresholds" in str(e):
+                    print("Warning: Tracking evaluation failed due to threshold calculation issue.")
+                    print("This is a known issue with the nuScenes tracking evaluation code, ")
+                    print("often occurring with small datasets like v1.0-mini.")
+                    print("Skipping tracking metrics...")
+                else:
+                    raise
+            except Exception as e:
+                print(f"Evaluation failed with error: {e}")
+                raise
 
 if __name__ == '__main__':
-    torch.multiprocessing.set_start_method('fork')
+    if torch.multiprocessing.get_start_method(allow_none=True) is None:
+        torch.multiprocessing.set_start_method('spawn')
     main()

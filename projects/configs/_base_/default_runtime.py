@@ -10,8 +10,12 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 # yapf:enable
+
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
+import logging
+logger = logging.getLogger()
+logger.setLevel(logging.CRITICAL)
 work_dir = None
 load_from = None
 resume_from = None

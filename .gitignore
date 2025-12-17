@@ -38,7 +38,23 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# 忽略所有模型权重
+*.pt
+*.pth
+*.h5
+*.pkl
+*.pb
+*.onnx
+*.pkl
 
+# 忽略压缩包
+*.zip
+*.tar.gz
+
+# 忽略文件夹
+models/
+weights/
+checkpoints/
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
@@ -150,3 +166,32 @@ debug/
 *projs/
 
 core.*
+
+# 忽略所有模型权重
+*.pt
+*.pth
+*.h5
+*.pkl
+*.pb
+*.onnx
+
+# 忽略压缩包
+*.zip
+*.tar.gz
+
+# 忽略文件夹
+models/
+weights/
+checkpoints/
+
+# 但允许小文件
+!*.json
+!*.txt
+!*.md
+!*.py
+!*.yaml
+
+data/
+yangben_defense/
+fake_Uniad/
+fake_VAD/

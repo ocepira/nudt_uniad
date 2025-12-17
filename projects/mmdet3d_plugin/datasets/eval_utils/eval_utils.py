@@ -6,7 +6,7 @@ from nuscenes import NuScenes
 from pyquaternion import Quaternion
 import numpy as np
 from .metric_utils import min_ade, min_fde, miss_rate
-
+import json
 from nuscenes.utils.splits import create_splits_scenes
 from nuscenes.eval.detection.utils import category_to_detection_name
 from nuscenes.prediction import PredictHelper, convert_local_coords_to_global
@@ -43,6 +43,21 @@ def category_to_motion_name(category_name: str):
         return detection_mapping[category_name]
     else:
         return None
+def sse_print(event: str, data: dict) -> str:
+    """
+    SSE 打印
+    :param event: 事件名称
+    :param data: 事件数据（字典或能被 json 序列化的对象）
+    :return: SSE 格式字符串
+    """
+    # 将数据转成 JSON 字符串
+    json_str = json.dumps(data, ensure_ascii=False, default=lambda obj: obj.item() if isinstance(obj, np.generic) else obj)
+    
+    # 按 SSE 协议格式拼接
+    message = f"event: {event}\n" \
+              f"data: {json_str}\n"
+    print(message, flush=True)
+
 
 def detection_prediction_category_to_motion_name(category_name: str):
     """
@@ -391,9 +406,9 @@ def load_prediction(result_path: str, max_boxes_per_sample: int, box_cls, verbos
     # Deserialize results and get meta data.
     all_results = EvalBoxes.deserialize(data['results'], box_cls)
     meta = data['meta']
-    if verbose:
-        print("Loaded results from {}. Found detections for {} samples."
-              .format(result_path, len(all_results.sample_tokens)))
+
+        
+        
 
     # Check that each sample has no more than x predicted boxes.
     for sample_token in all_results.sample_tokens:
@@ -417,8 +432,9 @@ def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, cat
         attribute_map = {a['token']: a['name'] for a in nusc.attribute}
 
     if verbose:
-        print('Loading annotations for {} split from nuScenes version: {}'.format(eval_split, nusc.version))
+       # print('Loading annotations for {} split from nuScenes version: {}'.format(eval_split, nusc.version))
     # Read out all sample_tokens in DB.
+        pass
     sample_tokens_all = [s['token'] for s in nusc.sample]
     assert len(sample_tokens_all) > 0, "Error: Database has no samples!"
 

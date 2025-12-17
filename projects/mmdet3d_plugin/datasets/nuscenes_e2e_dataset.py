@@ -33,6 +33,26 @@ from projects.mmdet3d_plugin.datasets.data_utils.trajectory_api import NuScenesT
 from .data_utils.data_utils import lidar_nusc_box_to_global, obtain_map_info, output_to_nusc_box, output_to_nusc_box_det
 from nuscenes.prediction import convert_local_coords_to_global
 
+import logging
+logger = logging.getLogger()
+logger.setLevel(logging.CRITICAL)
+import json
+def sse_print(event: str, data: dict) -> str:
+    """
+    SSE 打印
+    :param event: 事件名称
+    :param data: 事件数据（字典或能被 json 序列化的对象）
+    :return: SSE 格式字符串
+    """
+    # 将数据转成 JSON 字符串
+    json_str = json.dumps(data, ensure_ascii=False, default=lambda obj: obj.item() if isinstance(obj, np.generic) else obj)
+    
+    # 按 SSE 协议格式拼接
+    message = f"event: {event}\n" \
+              f"data: {json_str}\n"
+    print(message, flush=True)
+
+
 
 @DATASETS.register_module()
 class NuScenesE2EDataset(NuScenesDataset):
@@ -91,7 +111,7 @@ class NuScenesE2EDataset(NuScenesDataset):
         self.use_nonlinear_optimizer = use_nonlinear_optimizer
 
         self.nusc = NuScenes(version=self.version,
-                             dataroot=self.data_root, verbose=True)
+                             dataroot=self.data_root, verbose=False)
 
         self.map_num_classes = 3
         if canvas_size[0] == 50:
@@ -149,7 +169,9 @@ class NuScenesE2EDataset(NuScenesDataset):
         """
         if self.file_client_args['backend'] == 'disk':
             # data_infos = mmcv.load(ann_file)
-            data = pickle.loads(self.file_client.get(ann_file.name))
+            # data = pickle.loads(self.file_client.get(ann_file.name)) 原来的
+            data = pickle.loads(self.file_client.get(ann_file))
+
             data_infos = list(
                 sorted(data['infos'], key=lambda e: e['timestamp']))
             data_infos = data_infos[::self.load_interval]
@@ -747,8 +769,8 @@ class NuScenesE2EDataset(NuScenesDataset):
         nusc_map_annos = {}
         mapped_class_names = self.CLASSES
 
-        print('Start to convert detection format...')
-        for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
+        # print('Start to convert detection format...')
+        for sample_id, det in enumerate(results):
             annos = []
             sample_token = self.data_infos[sample_id]['token']
 
@@ -837,8 +859,9 @@ class NuScenesE2EDataset(NuScenesDataset):
 
         mmcv.mkdir_or_exist(jsonfile_prefix)
         res_path = osp.join(jsonfile_prefix, 'results_nusc.json')
-        print('Results writes to', res_path)
-        mmcv.dump(nusc_submissions, res_path)
+
+        sse_print('results_write', {'message': f'Results writes to {res_path}'})
+        # mmcv.dump(nusc_submissions, res_path)
         return res_path
 
     def format_results(self, results, jsonfile_prefix=None):
@@ -884,8 +907,8 @@ class NuScenesE2EDataset(NuScenesDataset):
         nusc_annos = {}
         mapped_class_names = self.CLASSES
 
-        print('Start to convert detection format...')
-        for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
+        # print('Start to convert detection format...')
+        for sample_id, det in enumerate(results):
             annos = []
             sample_token = self.data_infos[sample_id]['token']
 
@@ -941,7 +964,7 @@ class NuScenesE2EDataset(NuScenesDataset):
 
         mmcv.mkdir_or_exist(jsonfile_prefix)
         res_path = osp.join(jsonfile_prefix, 'results_nusc_det.json')
-        print('Results writes to', res_path)
+        # print('Results writes to', res_path)
         mmcv.dump(nusc_submissions, res_path)
         return res_path
 
@@ -1096,7 +1119,9 @@ class NuScenesE2EDataset(NuScenesDataset):
 
         if show:
             self.show(results, out_dir, pipeline=pipeline)
-        return results_dict
+        # print("2321")
+        # return results_dict
+        return "event : end\ndata:{\"metric\": \"end\", \"value\": \"end\"}"
 
     def _evaluate_single(self,
                          result_path,

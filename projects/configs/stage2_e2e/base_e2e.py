@@ -11,6 +11,9 @@ point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 patch_size = [102.4, 102.4]
 img_norm_cfg = dict(mean=[103.530, 116.280, 123.675], std=[1.0, 1.0, 1.0], to_rgb=False)
+import logging
+logger = logging.getLogger()
+logger.setLevel(logging.CRITICAL)
 # For nuScenes we usually do 10-class detection
 class_names = [
     "car",
