@@ -28,6 +28,9 @@
 | device | 选填，默认为0 | 使用哪个gpu |
 | workers | 选填，默认为0 | 加载数据集时workers的数量 |
 
+## 下载nuscene_tiny数据集如/data所示
+## 下载对应的 model/ckpts
+
 ## 快速开始
 python main.py --process test projects/configs/stage1_track_map/base_track_map.py ckpts/uniad_base_track_map.pth
 
