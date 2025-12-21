@@ -1,3 +1,5 @@
+#GitHubUniad官方docker
+
 FROM nvidia/cuda:11.1.1-cudnn8-devel-ubuntu20.04
 
 
